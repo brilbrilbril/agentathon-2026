@@ -21,18 +21,44 @@ drafts the response — with a human analyst as the decision-maker.
 | Python | 3.11 or 3.12 | |
 | Node.js | 20 LTS or newer | for Vite |
 | Docker + Compose | v2 | Postgres only |
-| **poppler-utils** | any recent | provides `pdftotext`, required for PDF ingestion |
+| **`pdftotext`** | any recent | required for PDF ingestion — see below |
 | An OpenAI-compatible LLM server | — | see [Inference](#inference) below |
 
-```bash
-# poppler
-brew install poppler                        # macOS
-sudo apt-get install -y poppler-utils       # Ubuntu / WSL2 / Debian
-choco install poppler                       # Windows (or add poppler's bin/ to PATH)
+### `pdftotext`
 
-# verify everything
-python --version && node --version && docker compose version && pdftotext -v
+Ingestion shells out to `pdftotext` to turn the DCCS PDF export into text. Either
+**poppler-utils** or **Xpdf** provides it — they share the command and the `-layout`
+and `-enc` flags this project uses (poppler is a fork of Xpdf).
+
+**Check whether you already have it before installing anything:**
+
+```bash
+pdftotext -v
 ```
+
+On Windows it is often already present: Git for Windows and Sourcetree both bundle a copy
+in their `mingw64/bin`, which usually ends up on PATH.
+
+If it's missing:
+
+```bash
+# macOS
+brew install poppler
+
+# Ubuntu / WSL2 / Debian
+sudo apt-get install -y poppler-utils
+
+# Windows — any one of these
+winget install --id oschwartz10612.Poppler      # winget, ships with Windows 10/11
+scoop install poppler                           # if you use scoop
+choco install poppler                           # if you use Chocolatey
+# or download the Xpdf command-line tools from https://www.xpdfreader.com/download.html
+# and add the folder containing pdftotext.exe to your PATH
+```
+
+Only **ingestion** needs it. Once the data is in Postgres, the API, agents and UI never
+touch it again — so a teammate running the app against an already-loaded database can skip
+this entirely.
 
 The three source files (xlsx, PDF, pptx) are committed under `sample_dataset/` and
 `reference/`, so there is nothing else to download.
@@ -168,7 +194,7 @@ reference/          the QRC rulebook
 
 | Symptom | Cause |
 |---|---|
-| `pdftotext not found on PATH` | poppler isn't installed — see Prerequisites |
+| `pdftotext not found on PATH` | no poppler/Xpdf on PATH — see Prerequisites; you may already have one bundled with Git for Windows |
 | `connection refused` on port 5434 | `docker compose up -d` hasn't run, or Docker Desktop is stopped |
 | `/health` shows `"llm": false` | no inference server reachable at `LLM_BASE_URL` |
 | Agent answers without calling tools | llama.cpp started without `--jinja` |

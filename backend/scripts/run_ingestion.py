@@ -44,10 +44,13 @@ def main() -> None:
     # rather than deep inside the parser with a bare FileNotFoundError.
     if shutil.which(settings.PDFTOTEXT_BIN) is None:
         log.error(
-            "'%s' not found on PATH. PDF ingestion needs poppler-utils:\n"
+            "'%s' not found on PATH. PDF ingestion needs pdftotext, from either "
+            "poppler-utils or Xpdf:\n"
             "  macOS         brew install poppler\n"
             "  Ubuntu/WSL    sudo apt-get install -y poppler-utils\n"
-            "  Windows       choco install poppler   (or add poppler's bin/ to PATH)\n"
+            "  Windows       winget install --id oschwartz10612.Poppler\n"
+            "                (or download the Xpdf tools and add the folder to PATH —\n"
+            "                 Git for Windows often bundles one in mingw64/bin already)\n"
             "Then check with: pdftotext -v",
             settings.PDFTOTEXT_BIN,
         )

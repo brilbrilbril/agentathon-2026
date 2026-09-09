@@ -28,6 +28,11 @@ cd ../frontend && npm install && npm run dev  # http://localhost:5173
 
 Postgres runs on **port 5434** to avoid clashing with other local containers.
 
+Ingestion needs `pdftotext` on PATH (from poppler-utils *or* Xpdf — they share the command
+and the `-layout`/`-enc` flags used here). Check with `pdftotext -v`; on Windows one is
+often already bundled with Git for Windows. See the root
+[`README.md`](../README.md#pdftotext) for install options.
+
 ## Inference
 
 Any OpenAI-compatible endpoint. Defaults target a local `llama.cpp` server:
