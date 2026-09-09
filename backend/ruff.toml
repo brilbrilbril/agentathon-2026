@@ -1,0 +1,16 @@
+line-length = 120
+target-version = "py312"
+
+[lint]
+ignore = [
+    # `Depends(...)` in argument defaults is the standard FastAPI idiom.
+    "B008",
+    # This system reasons over naive dates from the source exports (WBS
+    # YYYYMMDD, COT datetimes, PDF DD/MM/YYYY). Timezones are not modelled.
+    "DTZ001", "DTZ005", "DTZ007", "DTZ011",
+    # PEP 695 type params need py3.12+ everywhere; TypeVar is fine here.
+    "UP047",
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["RUF059"]

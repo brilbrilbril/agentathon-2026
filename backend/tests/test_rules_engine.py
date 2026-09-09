@@ -2,6 +2,7 @@ from datetime import date
 
 from app.models.domain import BusinessUnitNature, MatchStatus
 from app.rules.rules_engine import (
+    assess_risk_tier,
     classify_wbs_business_unit,
     classify_wbs_status,
     compare_stated_vs_desc_designation,
@@ -145,3 +146,109 @@ def test_desc_no_flag_when_consistent():
 
 def test_desc_no_flag_when_stated_is_subset_of_desc():
     assert compare_stated_vs_desc_designation("Relationship", "Audit Team Restricted, Relationship") is None
+
+
+# ---- risk triage (QRC slides 4/5/6) ----
+
+def test_restricted_desc_designation_is_high_risk():
+    tier, reason, _ = assess_risk_tier("DESC", designation_type="Audit Team Restricted, Relationship")
+    assert tier == "High"
+    assert "Restricted" in reason
+
+
+def test_audit_engagement_is_high_risk():
+    tier, reason, _ = assess_risk_tier("WBS", business_unit="Audit")
+    assert tier == "High"
+    assert "Audit" in reason
+
+
+def test_desc_contradiction_escalates_to_high():
+    tier, reason, _ = assess_risk_tier("DESC", designation_type="Relationship", has_desc_contradiction=True)
+    assert tier == "High"
+    assert "contradicts" in reason.lower()
+
+
+def test_relationship_designation_is_medium():
+    tier, _, _ = assess_risk_tier("DESC", designation_type="Relationship")
+    assert tier == "Medium"
+
+
+def test_assurance_engagement_is_medium():
+    tier, _, _ = assess_risk_tier("WBS", business_unit="Assurance")
+    assert tier == "Medium"
+
+
+def test_non_assurance_is_low():
+    """The canary again: a Non-Assurance engagement must not demand attention."""
+    tier, _, _ = assess_risk_tier("WBS", business_unit="Non-Assurance", status="Ongoing")
+    assert tier == "Low"
+
+
+def test_dccs_history_is_low():
+    tier, _, _ = assess_risk_tier("DCCS_HISTORY", status="Pursuing")
+    assert tier == "Low"
+
+
+def test_every_tier_carries_a_citation():
+    for kwargs in (
+        {"designation_type": "SEC Restricted"},
+        {"designation_type": "Relationship"},
+        {"business_unit": "Non-Assurance"},
+    ):
+        _, _, citation = assess_risk_tier("DESC", **kwargs)
+        assert "QRC" in citation
+
+
+# ---- robustness to a different dataset ----
+# A new dataset will use words this build has never seen. The rule is that
+# unknown must escalate or surface — never silently pass as low risk.
+
+def test_unseen_restricted_designation_still_high():
+    """'Sanctions Restricted' is not in the reference vocabulary but is
+    obviously an independence restriction."""
+    tier, reason, _ = assess_risk_tier("DESC", designation_type="Sanctions Restricted")
+    assert tier == "High"
+    assert "Restricted" in reason
+
+
+def test_completely_unknown_designation_escalates_not_ignored():
+    tier, reason, _ = assess_risk_tier("DESC", designation_type="Politically Exposed Person")
+    assert tier == "Medium", "an unrecognised designation must not be treated as harmless"
+    assert "unrecognised" in reason.lower()
+
+
+def test_unknown_business_unit_escalates():
+    tier, reason, _ = assess_risk_tier("WBS", business_unit="Actuarial Services")
+    assert tier == "Medium"
+    assert "unrecognised" in reason.lower()
+
+
+def test_wbs_l4_label_formatting_does_not_change_the_verdict():
+    """A dataset that spaces or cases the L4 label differently must still
+    classify as Audit — an exact-match test would silently downgrade it."""
+    for l4 in (
+        "A&A: AUD-Large & Complex",
+        "A&A: AUD - Large & Complex",
+        "a&a:  aud-large  &  complex",
+        "AUD-Large & Complex",
+    ):
+        nature, _ = classify_wbs_business_unit("Audit & Assurance", l4, "Statutory audit FY2025")
+        assert nature == BusinessUnitNature.AUDIT, f"failed for L4={l4!r}"
+
+
+def test_unknown_service_line_says_the_verdict_is_an_assumption():
+    nature, citation = classify_wbs_business_unit("Actuarial", "ACT: Reserving", "reserving review")
+    assert nature == BusinessUnitNature.NON_ASSURANCE
+    assert "assumed" in citation.lower(), "an uncovered service line must not look like a rulebook verdict"
+
+
+def test_known_service_lines_still_cite_the_rule_cleanly():
+    _, citation = classify_wbs_business_unit("Tax & Legal", "T&L: DT-Business Tax Advisory", "advisory")
+    assert citation == "QRC slide 6"
+
+
+def test_restricted_marker_drives_wbs_status_retention():
+    """classify_wbs_status keys off 'restricted' too, so an unseen restricted
+    label still retains a recent completed audit."""
+    _, include, _, _ = classify_wbs_status("Technically Completed", date.today(), "Sanctions Restricted")
+    assert include is True

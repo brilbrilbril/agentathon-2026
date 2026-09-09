@@ -46,25 +46,44 @@ def get_rules_by_source(session: Session, source_db: str) -> list[RuleChunk]:
     return [c for c in chunks if c.source_db == source_db]
 
 
-def search_rules(session: Session, query: str, source_db: str | None = None, top_k: int = 3) -> list[RuleChunk]:
-    rows = session.execute(
-        text(
-            """
-            SELECT *, ts_rank(search_vec, plainto_tsquery('english', :q)) AS score
-            FROM rule_chunks
-            WHERE search_vec @@ plainto_tsquery('english', :q)
-              AND (CAST(:source_db AS TEXT) IS NULL OR source_db = CAST(:source_db AS TEXT))
-            ORDER BY score DESC LIMIT :k
-            """
-        ),
-        {"q": query, "source_db": source_db, "k": top_k},
-    ).mappings().all()
+_FTS_SQL = """
+    SELECT *, ts_rank(search_vec, {query_fn}) AS score
+    FROM rule_chunks
+    WHERE search_vec @@ {query_fn}
+      AND (CAST(:source_db AS TEXT) IS NULL OR source_db = CAST(:source_db AS TEXT))
+    ORDER BY score DESC LIMIT :k
+"""
+
+
+def _run_fts(session: Session, query_fn: str, params: dict) -> list[RuleChunk]:
+    rows = session.execute(text(_FTS_SQL.format(query_fn=query_fn)), params).mappings().all()
     results = []
     for row in rows:
         chunk = _row_to_chunk(row)
         chunk.score = row["score"]
         results.append(chunk)
     return results
+
+
+def search_rules(session: Session, query: str, source_db: str | None = None, top_k: int = 3) -> list[RuleChunk]:
+    """Postgres FTS over ~20 chunks.
+
+    `plainto_tsquery` ANDs every term, which misses on conversational
+    questions ('why was this DCCS match excluded?'). When the strict query
+    returns nothing we retry with OR semantics so chat always gets a citation
+    if any term is relevant.
+    """
+    params = {"q": query, "source_db": source_db, "k": top_k}
+
+    results = _run_fts(session, "plainto_tsquery('english', :q)", params)
+    if results:
+        return results
+
+    terms = [t for t in re.findall(r"[A-Za-z0-9]+", query) if len(t) > 2]
+    if not terms:
+        return []
+    params["q"] = " | ".join(terms)
+    return _run_fts(session, "to_tsquery('english', :q)", params)
 
 
 def get_cross_border_table(session: Session) -> RuleChunk | None:

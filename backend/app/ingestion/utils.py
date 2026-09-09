@@ -1,3 +1,4 @@
+import math
 import re
 from datetime import date, datetime
 
@@ -11,7 +12,8 @@ def normalise_header(name: str) -> str:
 def none_if_blank(value):
     if value is None:
         return None
-    if isinstance(value, float) and value != value:  # NaN
+    # pandas leaves empty cells as float NaN even with dtype=str
+    if isinstance(value, float) and math.isnan(value):
         return None
     if isinstance(value, str) and value.strip() == "":
         return None

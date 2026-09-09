@@ -4,6 +4,7 @@ Usage: python scripts/run_ingestion.py
 """
 
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -38,6 +39,19 @@ def main() -> None:
         if not Path(path).exists():
             log.error("%s not found at %s", label, path)
             sys.exit(1)
+
+    # The PDF loader shells out to poppler. Fail here with something actionable
+    # rather than deep inside the parser with a bare FileNotFoundError.
+    if shutil.which(settings.PDFTOTEXT_BIN) is None:
+        log.error(
+            "'%s' not found on PATH. PDF ingestion needs poppler-utils:\n"
+            "  macOS         brew install poppler\n"
+            "  Ubuntu/WSL    sudo apt-get install -y poppler-utils\n"
+            "  Windows       choco install poppler   (or add poppler's bin/ to PATH)\n"
+            "Then check with: pdftotext -v",
+            settings.PDFTOTEXT_BIN,
+        )
+        sys.exit(1)
 
     session = SessionLocal()
     try:

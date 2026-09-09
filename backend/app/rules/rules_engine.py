@@ -5,11 +5,16 @@ Every function returns its result plus the QRC slide citation that governs it.
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 from app.config import settings
 from app.models.domain import BusinessUnitNature, MatchStatus, QCFlag
 
+# The designations seen in the sample data. This list is a *reference*, not a
+# gate: a different dataset will carry designations that are not here, so
+# nothing may depend on membership. Recognition is by meaning (does the label
+# say "restricted"?) and anything unrecognised is escalated, never dropped.
 _KNOWN_DESIGNATIONS = [
     "Relationship",
     "DTT Restricted",
@@ -22,14 +27,33 @@ _KNOWN_DESIGNATIONS = [
     "Audit Team Restricted",
 ]
 
-_RESTRICTED_KEYWORDS = (
-    "DTT Restricted",
-    "SEC Restricted",
-    "EUPIE Restricted",
-    "Reverse Restricted",
-    "Business Relationship Restricted",
-    "Audit Team Restricted",
-)
+# Substrings that mark a designation as carrying independence risk. Matching on
+# the word rather than the full label means a new dataset's
+# "Sanctions Restricted" or "PIE Restricted" is still caught.
+_RESTRICTED_MARKERS = ("restricted", "prohibited", "banned")
+
+# Designations that need a condition but are not independence-restrictions.
+_CONDITION_MARKERS = ("relationship", "watchlist", "loan rule", "monitor")
+
+
+def is_known_designation(designation: str) -> bool:
+    """Whether a designation label was seen in the reference vocabulary.
+
+    Used only to decide whether to *flag* something as unfamiliar — never to
+    decide whether it matters.
+    """
+    normalised = designation.strip().lower()
+    return any(normalised == known.lower() for known in _KNOWN_DESIGNATIONS)
+
+
+def _squash(value: str | None) -> str:
+    """Lowercase and collapse whitespace, so label formatting differences
+    between datasets don't change a verdict."""
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+# Service lines slide 6 explicitly routes to Non-Assurance.
+_NON_ASSURANCE_L1_MARKERS = ("t&l", "tax", "sr&t", "t&t", "technology", "consulting", "legal")
 
 
 def classify_wbs_business_unit(l1: str | None, l4: str | None, wbs_text: str | None) -> tuple[BusinessUnitNature, str]:
@@ -43,14 +67,24 @@ def classify_wbs_business_unit(l1: str | None, l4: str | None, wbs_text: str | N
     any other A&A                                         -> NON_ASSURANCE
     """
     citation = "QRC slide 6"
-    l1_norm = (l1 or "").strip().lower()
-    l4_norm = (l4 or "").strip().lower()
+    l1_norm = _squash(l1)
+    l4_norm = _squash(l4)
     text_norm = (wbs_text or "").lower()
 
     if not l1_norm.startswith("audit") and "a&a" not in l1_norm:
+        if l1 and not any(k in l1_norm for k in _NON_ASSURANCE_L1_MARKERS):
+            # Slide 6 enumerates T&L / SR&T / T&T and A&A. A service line
+            # outside those is not covered by the rule, so say the verdict is
+            # an assumption rather than presenting it as the rulebook's.
+            return (
+                BusinessUnitNature.NON_ASSURANCE,
+                f"{citation} (assumed — service line '{l1}' is not covered by slide 6)",
+            )
         return BusinessUnitNature.NON_ASSURANCE, citation
 
-    is_large_complex = l4_norm == "a&a: aud-large & complex"
+    # Matched on content rather than an exact label so a dataset that writes
+    # 'A&A: AUD - Large & Complex' or reorders the prefix still classifies.
+    is_large_complex = "aud" in l4_norm and "large" in l4_norm and "complex" in l4_norm
     if is_large_complex and any(k in text_norm for k in ("statutory", "financial statement")):
         return BusinessUnitNature.AUDIT, citation
     if is_large_complex and any(k in text_norm for k in ("assurance", "attestation", "isae")):
@@ -119,10 +153,15 @@ def parse_desc_designations(designation_type: str | None) -> list[str]:
 
 
 def _has_restricted_designation(designation_type: str | None) -> bool:
+    """True when any designation carries an independence restriction.
+
+    Matches on the marker word, so a designation this codebase has never seen
+    ('Sanctions Restricted') is still treated as restricted.
+    """
     if not designation_type:
         return False
     text = designation_type.lower()
-    return any(k.lower() in text for k in _RESTRICTED_KEYWORDS)
+    return any(marker in text for marker in _RESTRICTED_MARKERS)
 
 
 def is_dccs_match_relevant(
@@ -200,6 +239,101 @@ def evaluate_cross_border(
         reason="Neither client nor GUP is listed in DESC — cross-border check required",
         citation=citation,
     )
+
+
+def assess_risk_tier(
+    source: str,
+    designation_type: str | None = None,
+    business_unit: str | None = None,
+    status: str | None = None,
+    has_desc_contradiction: bool = False,
+) -> tuple[str, str, str]:
+    """Triage a match by how much reviewer attention it warrants.
+
+    Returns (tier, reason, citation).
+
+    This is the difference between handing a reviewer a flat list and handing
+    them a worklist. It is deliberately deterministic and derived only from
+    verdicts other QRC rules already produced, so a tier can always be
+    explained and never drifts between runs.
+
+        HIGH   — independence risk: a Restricted designation in DESC (slide 5),
+                 an Audit engagement (slide 6), or DESC contradicting the
+                 request (slide 4).
+        MEDIUM — a condition is likely: Relationship / Watchlist / Loan Rule
+                 designations, or an Assurance engagement.
+        LOW    — record it, but it does not by itself change the outcome:
+                 ongoing Non-Assurance work and prior DCCS activity.
+    """
+    citation = "QRC slides 4, 5, 6 (risk triage)"
+
+    if has_desc_contradiction:
+        return (
+            "High",
+            "DESC contradicts the designation stated on the request — DESC is authoritative (slide 4)",
+            citation,
+        )
+
+    if _has_restricted_designation(designation_type):
+        restricted = [
+            d for d in parse_desc_designations(designation_type)
+            if any(m in d.lower() for m in _RESTRICTED_MARKERS)
+        ]
+        return (
+            "High",
+            f"DESC records a Restricted designation ({', '.join(restricted)}) — independence risk (slide 5)",
+            citation,
+        )
+
+    if business_unit == BusinessUnitNature.AUDIT.value:
+        return "High", "Audit engagement — independence risk (slide 6)", citation
+
+    designations = parse_desc_designations(designation_type)
+    if any(any(m in d.lower() for m in _CONDITION_MARKERS) for d in designations):
+        return (
+            "Medium",
+            f"DESC designation '{', '.join(designations)}' requires a condition (slide 5)",
+            citation,
+        )
+
+    # A designation this build has never seen must not be quietly treated as
+    # harmless — a new dataset will carry labels that are not in the reference
+    # vocabulary, and under-triaging one is a compliance failure. Escalate and
+    # say why, so a reviewer decides rather than the parser.
+    unfamiliar = [d for d in designations if not is_known_designation(d)]
+    if unfamiliar:
+        return (
+            "Medium",
+            (
+                f"Unrecognised DESC designation '{', '.join(unfamiliar)}' — not in the known "
+                "vocabulary, so it has not been risk-assessed. Reviewer to confirm (slide 5)"
+            ),
+            citation,
+        )
+
+    if business_unit == BusinessUnitNature.ASSURANCE.value:
+        return "Medium", "Assurance engagement — confirm scope (slide 6)", citation
+
+    # Same reasoning for an unfamiliar business unit.
+    known_units = {u.value for u in BusinessUnitNature}
+    if business_unit and business_unit not in known_units:
+        return (
+            "Medium",
+            (
+                f"Unrecognised business unit '{business_unit}' — could not be classified "
+                "against slide 6. Reviewer to confirm"
+            ),
+            citation,
+        )
+
+    if source == "DCCS_HISTORY":
+        return "Low", "Prior DCCS activity — contextual, no designation attached (slide 10)", citation
+
+    if business_unit == BusinessUnitNature.NON_ASSURANCE.value:
+        label = status or "engagement"
+        return "Low", f"Non-Assurance {label.lower()} — record only (slide 6)", citation
+
+    return "Low", "No designation or engagement signal that raises risk", citation
 
 
 def compare_stated_vs_desc_designation(stated: str | None, desc_designation: str | None) -> QCFlag | None:

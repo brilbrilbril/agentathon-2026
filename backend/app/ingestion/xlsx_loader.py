@@ -5,6 +5,7 @@ them — the agent must reason over what is actually stored (A3, MASTER §2.2).
 """
 
 import logging
+import re
 
 import pandas as pd
 from sqlalchemy import text
@@ -73,15 +74,52 @@ _DATE_COLUMNS = {"review_due_date", "date_first_added", "wbs_start_date", "wbs_e
 _DATETIME_COLUMNS = {"submission_time"}
 
 
+def _match_key(name: str) -> str:
+    """Collapse a header to something comparable across datasets: case,
+    spacing and punctuation differences ('CLIENT NAME FULL' vs
+    'Client Name Full' vs 'Client_Name_Full') all reduce to the same key."""
+    return re.sub(r"[^a-z0-9]", "", normalise_header(name).lower())
+
+
+def _resolve_columns(df_columns, column_map: dict[str, str], sheet_name: str) -> dict[str, str]:
+    """Map schema fields to whatever the sheet actually calls them.
+
+    Exact header text differs between exports, so match on the collapsed key
+    and log anything we could not find — a silently missing column becomes a
+    silently NULL field, which is worse than a loud warning.
+    """
+    by_key = {_match_key(c): c for c in df_columns}
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+
+    for expected_header, dest_col in column_map.items():
+        actual = by_key.get(_match_key(expected_header))
+        if actual is None:
+            missing.append(expected_header)
+            continue
+        resolved[actual] = dest_col
+
+    if missing:
+        log.warning(
+            "%s: %d expected column(s) not found in this file and will be NULL: %s",
+            sheet_name, len(missing), ", ".join(missing),
+        )
+    return resolved
+
+
 def _load_sheet(path: str, sheet_name: str, column_map: dict[str, str], required_col: str | None = None) -> list[dict]:
     df = pd.read_excel(path, sheet_name=sheet_name, dtype=str)
     df.columns = [normalise_header(c) for c in df.columns]
+    resolved = _resolve_columns(df.columns, column_map, sheet_name)
 
     rows = []
+    skipped = 0
     for _, series in df.iterrows():
         raw = {k: none_if_blank(v) for k, v in series.to_dict().items()}
         row = {"raw": raw}
-        for src_col, dest_col in column_map.items():
+        for dest_col in column_map.values():
+            row[dest_col] = None
+        for src_col, dest_col in resolved.items():
             value = none_if_blank(raw.get(src_col))
             if dest_col in _DATE_COLUMNS:
                 value = safe_date(value)
@@ -92,8 +130,15 @@ def _load_sheet(path: str, sheet_name: str, column_map: dict[str, str], required
         # filters: ...") that have no real data — skip anything missing the
         # sheet's required NOT NULL column.
         if required_col and not row.get(required_col):
+            skipped += 1
             continue
         rows.append(row)
+
+    if skipped:
+        # A handful is the usual export footer. A lot means the required
+        # column probably isn't where we think it is in this dataset.
+        level = log.warning if skipped > 5 else log.info
+        level("%s: skipped %d row(s) with no '%s'", sheet_name, skipped, required_col)
     return rows
 
 

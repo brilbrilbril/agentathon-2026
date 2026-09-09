@@ -36,11 +36,11 @@ def save_matches(session: Session, screening_id: str, matches: list[dict]) -> No
                 INSERT INTO matches (screening_id, source, query_name, matched_name, similarity,
                     country, designation_type, gup_name, partner_name, practice_office, business_unit,
                     status, entity_role, match_date, include_in_summary, exclusion_reason,
-                    rule_citation, raw)
+                    rule_citation, risk_tier, risk_reason, raw)
                 VALUES (:screening_id, :source, :query_name, :matched_name, :similarity,
                     :country, :designation_type, :gup_name, :partner_name, :practice_office, :business_unit,
                     :status, :entity_role, :match_date, :include_in_summary, :exclusion_reason,
-                    :rule_citation, CAST(:raw AS JSONB))
+                    :rule_citation, :risk_tier, :risk_reason, CAST(:raw AS JSONB))
                 """
             ),
             row,

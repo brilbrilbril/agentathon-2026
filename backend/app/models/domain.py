@@ -24,6 +24,18 @@ class MatchStatus(str, Enum):
     PURSUING = "Pursuing"
 
 
+class RiskTier(str, Enum):
+    """How much reviewer attention a match warrants.
+
+    The point of triage is that a reviewer reads HIGH first and may never need
+    to read LOW at all — see `rules_engine.assess_risk_tier`.
+    """
+
+    HIGH = "High"
+    MEDIUM = "Medium"
+    LOW = "Low"
+
+
 class EntityMatch(BaseModel):
     source: MatchSource
     matched_name: str

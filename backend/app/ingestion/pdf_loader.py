@@ -159,10 +159,21 @@ def parse_case_header(lines: list[str]) -> dict:
     }
 
 
-def _guess_location(block_text: str) -> str | None:
+def _guess_location(block_text: str, entity_name: str = "") -> str | None:
+    """Best-effort country for an entity block.
+
+    `_KNOWN_COUNTRIES` is a convenience list, not a constraint — a dataset
+    covering other jurisdictions will simply miss it, so a miss is logged
+    rather than passed off as "this entity has no location".
+    """
     for country in _KNOWN_COUNTRIES:
         if re.search(rf"\b{re.escape(country)}\b", block_text):
             return country
+    log.info(
+        "No known country matched for '%s' — location left unset. Extend _KNOWN_COUNTRIES "
+        "if this dataset covers new jurisdictions.",
+        entity_name or "(unnamed entity)",
+    )
     return None
 
 
@@ -208,7 +219,7 @@ def parse_entities(lines: list[str]) -> list[dict]:
         stated_designation = values[-2] if len(values) >= 2 else None
 
         block_text = "\n".join(block)
-        location = _guess_location(block_text)
+        location = _guess_location(block_text, entity_name)
 
         parties.append({
             "entity_name": entity_name,
@@ -226,17 +237,51 @@ def parse_entities(lines: list[str]) -> list[dict]:
     return parties
 
 
+# Statuses seen in the sample export. Used as a fast path only — a different
+# dataset will use different wording, so recognition must not depend on this.
 _STATUS_PREFIXES = (
     "Approved", "Opportunity Lost", "Engagement Complete", "No Conflicts",
-    "Draft", "Withdrawn", "Rejected", "Pending", "In Progress",
+    "Draft", "Withdrawn", "Rejected", "Pending", "In Progress", "Closed",
+    "Cleared", "Declined", "Completed", "Cancelled", "Canceled", "On Hold",
 )
 
-
 def _find_status_idx(fields: list[str]) -> int | None:
+    """Locate the Status column.
+
+    Two strategies, both anchored on something real:
+
+    1. The known status vocabulary (fast path).
+    2. Position — Status is the field immediately before the request date, so
+       a DD/MM/YYYY field locates it even when the wording is unfamiliar.
+
+    There is deliberately no "looks like a status" fallback. Shape matching
+    was tried and pulled in Entity Name and Request Type values ('Client',
+    'KDDI Corporation'), inventing ~1,400 junk rows. Guessing wrong is worse
+    than reporting the row as unparsed, so anything else is surfaced instead.
+    """
     for i in range(len(fields) - 1, -1, -1):
         if fields[i].startswith(_STATUS_PREFIXES):
             return i
+
+    for i, field_value in enumerate(fields):
+        if _DATE_FIELD_RE.match(field_value) and i > 0:
+            return i - 1
+
     return None
+
+
+# Values that belong to other columns. When Entity Name / Side / Entity Role
+# are all blank the field before the date is one of these, not a status —
+# recording it as one produced 389 rows with status 'Conflict Check Request'.
+_NON_STATUS_VALUES = {"client", "other", "client side", "other side"}
+_NON_STATUS_SUFFIXES = ("request",)
+
+
+def _is_plausible_status(value: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered in _NON_STATUS_VALUES:
+        return False
+    return not lowered.endswith(_NON_STATUS_SUFFIXES)
 
 
 def parse_dccs_rows_for_entity(lines: list[str], for_entity: str, source_case_id: str) -> list[dict]:
@@ -250,6 +295,7 @@ def parse_dccs_rows_for_entity(lines: list[str], for_entity: str, source_case_id
     ID forward onto ID-less rows."""
     section = _find_section(lines, "DCCS Search Results", ["Manual Search Results"])
     rows = []
+    unparsed: list[str] = []
     current_request_id = None
 
     for raw_line in section:
@@ -272,9 +318,18 @@ def parse_dccs_rows_for_entity(lines: list[str], for_entity: str, source_case_id
         fields = [f.strip() for f in re.split(r"\s{2,}", rest) if f.strip() != ""]
         status_idx = _find_status_idx(fields)
         if status_idx is None:
+            unparsed.append(line.strip()[:120])
             continue
 
+        # The slot before the date isn't always Status — when the middle
+        # columns are blank it holds Request Type or Side. Keep the row (its
+        # id, date, partner and description are real) but leave status unset
+        # rather than mislabelling another column as one.
         status = fields[status_idx]
+        if not _is_plausible_status(status):
+            status_idx += 1
+            status = None
+
         request_date = None
         lead_partner = None
         description = None
@@ -321,6 +376,18 @@ def parse_dccs_rows_for_entity(lines: list[str], for_entity: str, source_case_id
             "description": description,
             "raw": {"line": line.strip()},
         })
+
+    if unparsed:
+        # Silently dropping rows is the worst failure mode here — the table
+        # would simply come out shorter, with nothing to indicate why. Report
+        # it so a new dataset's different column wording gets noticed.
+        total = len(rows) + len(unparsed)
+        ratio = len(unparsed) / max(total, 1)
+        level = log.warning if ratio > 0.1 else log.debug
+        level(
+            "%s: %d of %d candidate DCCS row(s) unparsed (%.0f%%). First: %s",
+            for_entity, len(unparsed), total, ratio * 100, unparsed[0],
+        )
     return rows
 
 

@@ -14,10 +14,19 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.domain import BusinessUnitNature, EntityMatch, MatchSource, MatchStatus
 
+# Legal-form suffixes stripped before comparing names. SEA forms first, then
+# common international ones — a dataset covering new regions should have its
+# forms added here rather than silently matching worse.
 _LEGAL_SUFFIXES = [
+    # SEA
     "CO., LTD", "CO LTD", "COMPANY LIMITED", "LIMITED", "LTD", "CORPORATION",
-    "CORP", "PTE LTD", "PTE. LTD.", "SDN BHD", "TBK", "PT", "INC", "LLC",
-    "K.K.", "KK", "L.P.", "LP",
+    "CORP", "PTE LTD", "PTE. LTD.", "SDN BHD", "BHD", "TBK", "PT", "PLC",
+    "K.K.", "KK", "CO., LTD.", "PUBLIC COMPANY LIMITED",
+    # International
+    "INC", "INCORPORATED", "LLC", "L.L.C.", "L.P.", "LP", "LLP", "GMBH",
+    "AG", "SA", "S.A.", "SAS", "BV", "B.V.", "NV", "N.V.", "AB", "AS",
+    "OY", "SPA", "S.P.A.", "SRL", "S.R.L.", "PTY LTD", "PTY", "GROUP",
+    "HOLDINGS", "HOLDING",
 ]
 
 _PUNCT_RE = re.compile(r"[.,()\-]")
